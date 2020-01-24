@@ -9,12 +9,14 @@ import org.jfrog.build.extractor.clientConfiguration.ArtifactoryClientBuilderBas
 import org.jfrog.build.extractor.clientConfiguration.ArtifactoryDependenciesClientBuilder
 import org.junit.Rule
 import spock.lang.Specification
+import spock.lang.Timeout
 import spock.lang.Unroll
 
 import static org.gradle.testkit.runner.TaskOutcome.SUCCESS
 
 class GradlePublishIntegrationTest extends Specification {
-    private static VersionNumber GRADLE_6 = VersionNumber.parse('6.0')
+    private static final VersionNumber GRADLE_6 = VersionNumber.parse('6.0')
+    public static final List<String> GRADLE_TEST_VERSIONS = ['4.10.3', '5.6.4', '6.0.1']
 
     @Rule TestBuildRule testBuild = new TestBuildRule()
 
@@ -78,7 +80,7 @@ class GradlePublishIntegrationTest extends Specification {
         true
 
         where:
-        gradleVersion << ['4.10.3', '5.6.4', '6.0.1']
+        gradleVersion << GRADLE_TEST_VERSIONS
     }
 
     /**
@@ -133,7 +135,7 @@ class GradlePublishIntegrationTest extends Specification {
         true
 
         where:
-        gradleVersion << ['4.10.3', '5.6.4', '6.0.1']
+        gradleVersion << GRADLE_TEST_VERSIONS
     }
 
     /**
@@ -176,7 +178,69 @@ class GradlePublishIntegrationTest extends Specification {
         true
 
         where:
-        gradleVersion << ['4.10.3', '5.6.4', '6.0.1']
+        gradleVersion << GRADLE_TEST_VERSIONS
+    }
+
+    /**
+     * Tests that publishing works with only a single project build.  Checks that all artifacts and build info are
+     * published to a local artifactory instance.
+     */
+    @Unroll
+    @Timeout(30)
+    @UsesTestBuild("single-project-publish")
+    def "does not deadlock when root project has unresolved artifact (Gradle #gradleVersion)"() {
+        def version = VersionNumber.parse(gradleVersion)
+
+        given:
+        file('build.gradle') << """
+            configurations {
+                foo { resolutionStrategy.assumeFluidDependencies() }
+            }
+            
+            task fooJar(type: Jar) {
+                classifier = 'foo'
+                from 'build.gradle'
+            }
+            
+            artifacts {
+                foo fooJar
+            }
+            
+            artifactoryDeploy.dependsOn configurations.foo.incoming.files
+        """
+
+        expect:
+        BuildResult result = succeeds(gradleVersion, "artifactoryPublish")
+
+        and:
+        result.task(':artifactoryPublish').outcome == SUCCESS
+        result.task(':artifactoryDeploy').outcome == SUCCESS
+
+        and:
+        Build buildInfo = new PublishedBuildInfo(result.output).getPublishedInfo()
+        buildInfo.modules.size() == 1
+
+        def shared = buildInfo.getModule("org.jfrog.test.gradle.publish:shared:1.0-SNAPSHOT")
+        shared.artifacts.size() == (version < GRADLE_6 ? 3 : 4)
+        shared.dependencies.size() == 0
+
+        and:
+        assertAllArtifactsExist(
+            'shared/1.0-SNAPSHOT/shared-1.0-SNAPSHOT.jar',
+            'shared/1.0-SNAPSHOT/shared-1.0-SNAPSHOT.properties',
+            'shared/1.0-SNAPSHOT/shared-1.0-SNAPSHOT.pom'
+        )
+
+        and:
+        if (version >= GRADLE_6) {
+            assertAllArtifactsExist(
+                'shared/1.0-SNAPSHOT/shared-1.0-SNAPSHOT.module'
+            )
+        }
+        true
+
+        where:
+        gradleVersion << GRADLE_TEST_VERSIONS
     }
 
     BuildResult succeeds(String gradleVersion, String... tasks) {
@@ -185,6 +249,7 @@ class GradlePublishIntegrationTest extends Specification {
                 .withGradleVersion(gradleVersion)
                 .withProjectDir(testBuild.root)
                 .withPluginClasspath()
+                .withDebug(true)
                 .withArguments(arguments)
                 .build()
         println result.output
