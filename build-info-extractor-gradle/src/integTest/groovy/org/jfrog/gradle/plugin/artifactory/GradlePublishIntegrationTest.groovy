@@ -84,6 +84,77 @@ class GradlePublishIntegrationTest extends Specification {
     }
 
     /**
+     * Tests that when all projects in a multi-project build have the artifactory plugin applied, all artifacts
+     * and build info are published to a local artifactory instance.
+     */
+    @Unroll
+    @UsesTestBuild("all-projects-publish")
+    def "can publish artifacts and build info to local artifactory instance when configurations are selected (Gradle #gradleVersion)"() {
+        def version = VersionNumber.parse(gradleVersion)
+
+        given:
+        file('build.gradle') << """
+            artifactory {
+                publish {
+                    defaults {
+                        publishConfigs('archives')
+                    }
+                }
+            }
+        """
+
+        expect:
+        BuildResult result = succeeds(gradleVersion, "artifactoryPublish")
+
+        and:
+        result.task(':services:webservice:artifactoryPublish').outcome == SUCCESS
+        result.task(':api:artifactoryPublish').outcome == SUCCESS
+        result.task(':shared:artifactoryPublish').outcome == SUCCESS
+        result.task(':artifactoryDeploy').outcome == SUCCESS
+
+        and:
+        Build buildInfo = new PublishedBuildInfo(result.output).getPublishedInfo()
+        buildInfo.modules.size() == 3
+
+        def webservice = buildInfo.getModule("org.jfrog.test.gradle.publish:webservice:1.0-SNAPSHOT")
+        webservice.artifacts.size() == (version < GRADLE_6 ? 2 : 3)
+        webservice.dependencies.size() == 7
+
+        def api = buildInfo.getModule("org.jfrog.test.gradle.publish:api:1.0-SNAPSHOT")
+        api.artifacts.size() == (version < GRADLE_6 ? 4 : 5)
+        api.dependencies.size() == 5
+
+        def shared = buildInfo.getModule("org.jfrog.test.gradle.publish:shared:1.0-SNAPSHOT")
+        shared.artifacts.size() == (version < GRADLE_6 ? 2 : 3)
+        shared.dependencies.size() == 0
+
+        and:
+        assertAllArtifactsExist(
+            'shared/1.0-SNAPSHOT/shared-1.0-SNAPSHOT.jar',
+            'shared/1.0-SNAPSHOT/shared-1.0-SNAPSHOT.pom',
+            'webservice/1.0-SNAPSHOT/webservice-1.0-SNAPSHOT.jar',
+            'webservice/1.0-SNAPSHOT/webservice-1.0-SNAPSHOT.pom',
+            'api/1.0-SNAPSHOT/api-1.0-SNAPSHOT.jar',
+            'api/1.0-SNAPSHOT/api-1.0-SNAPSHOT.txt',
+            'api/ivy-1.0-SNAPSHOT.xml',
+            'api/1.0-SNAPSHOT/api-1.0-SNAPSHOT.pom'
+        )
+
+        and:
+        if (version >= GRADLE_6) {
+            assertAllArtifactsExist(
+                'webservice/1.0-SNAPSHOT/webservice-1.0-SNAPSHOT.module',
+                'api/1.0-SNAPSHOT/api-1.0-SNAPSHOT.module',
+                'shared/1.0-SNAPSHOT/shared-1.0-SNAPSHOT.module'
+            )
+        }
+        true
+
+        where:
+        gradleVersion << ['4.10.3', '5.6.4', '6.0.1']
+    }
+
+    /**
      * Tests that when only certain projects in a multi-project build have the artifactory plugin applied, the plugin
      * correctly handles the case.  Checks that all artifacts and build info are published to a local artifactory
      * instance.
